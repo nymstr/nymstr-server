@@ -1,3 +1,6 @@
 storage/
 target/
 .env
+secrets/
+logs/
+Cargo.lock
