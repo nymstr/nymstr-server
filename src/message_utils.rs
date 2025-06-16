@@ -1,5 +1,7 @@
 use crate::{crypto_utils::CryptoUtils, db_utils::DbUtils};
-use nym_sdk::mixnet::{AnonymousSenderTag, MixnetClientSender, MixnetMessageSender, ReconstructedMessage};
+use nym_sdk::mixnet::{
+    AnonymousSenderTag, MixnetClientSender, MixnetMessageSender, ReconstructedMessage,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -85,21 +87,22 @@ impl MessageUtils {
 
     async fn handle_query(&mut self, data: &Value, sender_tag: AnonymousSenderTag) {
         if let Some(username) = data.get("username").and_then(Value::as_str) {
-        match self.db.get_user_by_username(username).await.unwrap_or(None) {
-            Some((user, pubkey, _)) => {
-                let reply = json!({"username": user, "publicKey": pubkey}).to_string();
-                self.send_encapsulated_reply(sender_tag, reply, "queryResponse", Some("query")).await;
+            match self.db.get_user_by_username(username).await.unwrap_or(None) {
+                Some((user, pubkey, _)) => {
+                    let reply = json!({"username": user, "publicKey": pubkey}).to_string();
+                    self.send_encapsulated_reply(sender_tag, reply, "queryResponse", Some("query"))
+                        .await;
+                }
+                None => {
+                    self.send_encapsulated_reply(
+                        sender_tag,
+                        "No user found".into(),
+                        "queryResponse",
+                        Some("query"),
+                    )
+                    .await;
+                }
             }
-            None => {
-                self.send_encapsulated_reply(
-                    sender_tag,
-                    "No user found".into(),
-                    "queryResponse",
-                    Some("query"),
-                )
-                .await;
-            }
-        }
         } else {
             self.send_encapsulated_reply(
                 sender_tag,
@@ -181,28 +184,28 @@ impl MessageUtils {
         let signature = signature.unwrap();
         if let Some((username, pubkey, nonce)) = self.pending_users.remove(&sender_tag) {
             if self.crypto.verify_signature(&pubkey, &nonce, signature) {
-            if self
-                .db
-                .add_user(&username, &pubkey, &sender_tag.to_string())
-                .await
-                .unwrap_or(false)
-            {
-                self.send_encapsulated_reply(
-                    sender_tag,
-                    "success".into(),
-                    "challengeResponse",
-                    Some("registration"),
-                )
-                .await;
-            } else {
-                self.send_encapsulated_reply(
-                    sender_tag,
-                    "error: database failure".into(),
-                    "challengeResponse",
-                    Some("registration"),
-                )
-                .await;
-            }
+                if self
+                    .db
+                    .add_user(&username, &pubkey, &sender_tag.to_string())
+                    .await
+                    .unwrap_or(false)
+                {
+                    self.send_encapsulated_reply(
+                        sender_tag,
+                        "success".into(),
+                        "challengeResponse",
+                        Some("registration"),
+                    )
+                    .await;
+                } else {
+                    self.send_encapsulated_reply(
+                        sender_tag,
+                        "error: database failure".into(),
+                        "challengeResponse",
+                        Some("registration"),
+                    )
+                    .await;
+                }
             } else {
                 self.send_encapsulated_reply(
                     sender_tag,
@@ -236,11 +239,8 @@ impl MessageUtils {
             return;
         }
         let username = username.unwrap();
-        if let Some((_user, pubkey, _)) = self
-            .db
-            .get_user_by_username(username)
-            .await
-            .unwrap_or(None)
+        if let Some((_user, pubkey, _)) =
+            self.db.get_user_by_username(username).await.unwrap_or(None)
         {
             let nonce = Uuid::new_v4().to_string();
             self.nonces
@@ -278,19 +278,19 @@ impl MessageUtils {
         let signature = signature.unwrap();
         if let Some((username, pubkey, nonce)) = self.nonces.remove(&sender_tag) {
             if self.crypto.verify_signature(&pubkey, &nonce, signature) {
-            if let Some((_u, _pk, db_sender_tag)) = self
-                .db
-                .get_user_by_username(&username)
-                .await
-                .unwrap_or(None)
-            {
-                if db_sender_tag != sender_tag.to_string() {
-                    let _ = self
-                        .db
-                        .update_user_field(&username, "senderTag", &sender_tag.to_string())
-                        .await;
+                if let Some((_u, _pk, db_sender_tag)) = self
+                    .db
+                    .get_user_by_username(&username)
+                    .await
+                    .unwrap_or(None)
+                {
+                    if db_sender_tag != sender_tag.to_string() {
+                        let _ = self
+                            .db
+                            .update_user_field(&username, "senderTag", &sender_tag.to_string())
+                            .await;
+                    }
                 }
-            }
                 self.send_encapsulated_reply(
                     sender_tag,
                     "success".into(),

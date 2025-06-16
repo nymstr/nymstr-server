@@ -38,12 +38,11 @@ impl DbUtils {
         &self,
         username: &str,
     ) -> Result<Option<(String, String, String)>> {
-        let row = sqlx::query(
-            "SELECT username, publicKey, senderTag FROM users WHERE username = ?",
-        )
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row =
+            sqlx::query("SELECT username, publicKey, senderTag FROM users WHERE username = ?")
+                .bind(username)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(row.map(|r| (r.get(0), r.get(1), r.get(2))))
     }
 
@@ -54,14 +53,13 @@ impl DbUtils {
         public_key: &str,
         sender_tag: &str,
     ) -> Result<bool> {
-        let res = sqlx::query(
-            "INSERT INTO users (username, publicKey, senderTag) VALUES (?, ?, ?)",
-        )
-        .bind(username)
-        .bind(public_key)
-        .bind(sender_tag)
-        .execute(&self.pool)
-        .await?;
+        let res =
+            sqlx::query("INSERT INTO users (username, publicKey, senderTag) VALUES (?, ?, ?)")
+                .bind(username)
+                .bind(public_key)
+                .bind(sender_tag)
+                .execute(&self.pool)
+                .await?;
         Ok(res.rows_affected() > 0)
     }
 

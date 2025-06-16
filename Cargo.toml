@@ -7,7 +7,7 @@ edition = "2024"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 dotenvy = "0.15"
-fern = "0.6"
+fern = { version = "0.6", features = ["colored"] }
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 anyhow = "1.0"
@@ -16,6 +16,6 @@ serde_json = "1.0"
 hex = "0.4"
 base64 = "0.21"
 openssl = "0.10"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
-nym-sdk = { git = "https://github.com/nymtech/nym", branch = "develop" }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "chrono"] }
+nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }
 uuid = { version = "1", features = ["v4"] }

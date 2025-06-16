@@ -1,5 +1,5 @@
 use anyhow::Result;
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use hex;
 use openssl::ec::{EcGroup, EcKey};
 use openssl::hash::MessageDigest;

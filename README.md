@@ -32,6 +32,8 @@ cargo run --release
 
 This will start the discovery node, connect to the Nym Mixnet, and begin processing incoming messages.
 
+Logs printed to the console are colorized by log level for easier readability.
+
 ## Environment Variables
 
 See `.env.example` for details on required variables.
