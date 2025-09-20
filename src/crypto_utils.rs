@@ -167,14 +167,14 @@ impl CryptoUtils {
         Ok(general_purpose::STANDARD.encode(signature_bytes))
     }
 
-    /// Verify a base64-encoded signature against a public key armored string.
+    /// Verify an armored PGP signature against a public key armored string.
     pub fn verify_signature(
         &self,
         public_key_armored: &str,
         message: &str,
-        signature_b64: &str,
+        signature_armored: &str,
     ) -> bool {
-        match self.verify_signature_inner(public_key_armored, message, signature_b64) {
+        match self.verify_signature_inner(public_key_armored, message, signature_armored) {
             Ok(valid) => valid,
             Err(e) => {
                 log::error!("verifySignature - failed: {}", e);
@@ -187,15 +187,26 @@ impl CryptoUtils {
         &self,
         public_key_armored: &str,
         message: &str,
-        signature_b64: &str,
+        signature_armored: &str,
     ) -> Result<bool> {
-        let signature_bytes = general_purpose::STANDARD.decode(signature_b64)?;
+        // Parse the armored signature (not base64)
+        let signature = if signature_armored.starts_with("-----BEGIN PGP SIGNATURE-----") {
+            // It's an armored signature, parse it directly
+            let (sig, _headers) = pgp::composed::StandaloneSignature::from_string(signature_armored)?;
+            sig
+        } else {
+            // Fall back to base64 decoding for backward compatibility
+            let signature_bytes = general_purpose::STANDARD.decode(signature_armored)?;
+            pgp::composed::StandaloneSignature::from_bytes(signature_bytes.as_slice())?
+        };
+
         let (public_key, _headers) = SignedPublicKey::from_string(public_key_armored)?;
-        
-        // For now, we'll return true if we can parse the signature and public key
-        // In a real implementation, we'd verify the signature against the message
-        // The PGP crate verification is complex and would need proper signature parsing
-        Ok(true)
+
+        // Verify the signature against the message
+        match signature.verify(&public_key, message.as_bytes()) {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 }
 
