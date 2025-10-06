@@ -20,6 +20,8 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
 nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }
 uuid = { version = "1", features = ["v4"] }
 pgp = "0.13"
+bip39 = "2.0"
+ed25519-zebra = { version = "4.1", features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3"

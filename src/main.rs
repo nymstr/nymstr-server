@@ -11,7 +11,102 @@ use crate::log_config::init_logging;
 use crate::message_utils::MessageUtils;
 use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
 use std::path::PathBuf;
+use std::process::Command;
+use std::io::{self, Write};
 use tokio_stream::StreamExt;
+use bip39::{Mnemonic, Language};
+
+/// Generate a new BIP39 seed phrase and store it
+fn generate_and_store_seed_phrase(secret_path: &PathBuf) -> anyhow::Result<String> {
+    println!("\n═══════════════════════════════════════════════════════════════");
+    println!("  ⚠️  IMPORTANT: BACK UP YOUR SEED PHRASE NOW!");
+    println!("═══════════════════════════════════════════════════════════════");
+
+    // Generate 24-word mnemonic (256 bits of entropy)
+    let mnemonic = Mnemonic::generate_in(Language::English, 24)?;
+    let phrase = mnemonic.to_string();
+
+    println!("\n{}\n", phrase);
+    println!("This seed phrase protects all encrypted keys in this server.");
+    println!("Write it down and store it securely. You'll need it to recover");
+    println!("your keys if this file is lost or deleted.\n");
+
+    println!("Do you want to encrypt this seed phrase with a password? (y/N): ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    if input.trim().eq_ignore_ascii_case("y") {
+        println!("\n⚠️  You chose encryption. After this setup completes:");
+        println!("   1. Run: ./scripts/encrypt_seed.sh");
+        println!("   2. Add to .env: SEED_PHRASE_ENCRYPTED=true");
+        println!("   3. The server will prompt for GPG password on startup\n");
+    } else {
+        println!("\n⚠️  Seed phrase will be stored in PLAINTEXT.");
+        println!("   Anyone with filesystem access can read it.\n");
+    }
+
+    println!("Press Enter to continue after you've backed up the seed phrase...");
+    io::stdout().flush()?;
+    let mut _confirm = String::new();
+    io::stdin().read_line(&mut _confirm)?;
+
+    // Store the seed phrase
+    std::fs::write(secret_path, &phrase)?;
+    std::fs::set_permissions(secret_path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+
+    Ok(phrase)
+}
+
+/// Load seed phrase, decrypting with GPG if needed
+fn load_seed_phrase(secret_path: &PathBuf) -> anyhow::Result<String> {
+    let encrypted = std::env::var("SEED_PHRASE_ENCRYPTED")
+        .unwrap_or_else(|_| "false".to_string())
+        .eq_ignore_ascii_case("true");
+
+    if encrypted {
+        // Check for encrypted file
+        let enc_path = secret_path.with_extension("enc");
+        if !enc_path.exists() {
+            anyhow::bail!(
+                "SEED_PHRASE_ENCRYPTED=true but {} not found. Run ./scripts/encrypt_seed.sh first.",
+                enc_path.display()
+            );
+        }
+
+        // Decrypt using GPG
+        println!("Decrypting seed phrase with GPG...");
+        let output = Command::new("gpg")
+            .args(["--decrypt", "--quiet"])
+            .arg(&enc_path)
+            .output()?;
+
+        if !output.status.success() {
+            anyhow::bail!("GPG decryption failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    } else {
+        // Read plaintext seed phrase
+        if !secret_path.exists() {
+            // First run - generate new seed phrase
+            return generate_and_store_seed_phrase(secret_path);
+        }
+
+        let phrase = std::fs::read_to_string(secret_path)?;
+        let phrase = phrase.trim();
+
+        if phrase.is_empty() {
+            anyhow::bail!(
+                "Seed phrase file {} is empty. Delete it and restart to generate a new one.",
+                secret_path.display()
+            );
+        }
+
+        Ok(phrase.to_string())
+    }
+}
 
 async fn generate_server_keys() -> anyhow::Result<()> {
     // Load environment
@@ -20,15 +115,13 @@ async fn generate_server_keys() -> anyhow::Result<()> {
     let keys_dir = std::env::var("KEYS_DIR").unwrap_or_else(|_| "storage/keys".to_string());
     std::fs::create_dir_all(&keys_dir)?;
 
-    let secret_path = std::env::var("SECRET_PATH").unwrap_or_else(|_| "secrets/encryption_password".to_string());
+    // Load or generate seed phrase
+    let secret_path = std::env::var("SECRET_PATH").unwrap_or_else(|_| "secrets/seed_phrase".to_string());
     let secret_path_buf = PathBuf::from(&secret_path);
     if let Some(parent) = secret_path_buf.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !secret_path_buf.exists() {
-        std::fs::write(&secret_path_buf, "")?;
-    }
-    let password = std::fs::read_to_string(&secret_path_buf)?.trim().to_string();
+    let password = load_seed_phrase(&secret_path_buf)?;
 
     let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "default".to_string());
 
@@ -89,19 +182,14 @@ async fn main() -> anyhow::Result<()> {
     let keys_dir = std::env::var("KEYS_DIR").unwrap_or_else(|_| "storage/keys".to_string());
     std::fs::create_dir_all(&keys_dir)?;
 
-    // Load encryption password (default path if unset), creating file if needed
+    // Load or generate seed phrase
     let secret_path =
-        std::env::var("SECRET_PATH").unwrap_or_else(|_| "secrets/encryption_password".to_string());
+        std::env::var("SECRET_PATH").unwrap_or_else(|_| "secrets/seed_phrase".to_string());
     let secret_path_buf = PathBuf::from(&secret_path);
     if let Some(parent) = secret_path_buf.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !secret_path_buf.exists() {
-        std::fs::write(&secret_path_buf, "")?;
-    }
-    let password = std::fs::read_to_string(&secret_path_buf)?
-        .trim()
-        .to_string();
+    let password = load_seed_phrase(&secret_path_buf)?;
 
     // Initialize utilities
     let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), password.clone())?;
