@@ -34,10 +34,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Uses `tokio::select!` to handle shutdown signals gracefully
 
 **crypto_utils.rs** - PGP-based cryptography:
-- Migrated from OpenSSL ECDSA to PGP (pgp crate) for key management
+- Uses PGP (pgp crate 0.16) for key management
 - Uses BIP39 24-word seed phrase (256-bit entropy) as master password
 - Encrypts private keys with AES-256-GCM using PBKDF2-derived keys from seed phrase
-- Generates RSA-2048 keypairs for users and server
+- Generates Ed25519 keypairs for users and server (~128-bit security)
 - Signs messages by hashing with SHA-256 first, then creating PGP signatures
 - Verifies signatures supporting both armored and base64-encoded formats
 - All keys stored in `KEYS_DIR` (default: `storage/keys/`)

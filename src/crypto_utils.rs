@@ -7,10 +7,12 @@ use openssl::rand::rand_bytes;
 use openssl::symm::{Cipher, Crypter, Mode};
 use std::fs;
 use std::path::PathBuf;
-use pgp::composed::{KeyType, SecretKeyParamsBuilder, SignedSecretKey, SignedPublicKey, Deserializable};
-use pgp::crypto::hash::HashAlgorithm;
-use pgp::types::SecretKeyTrait;
+use pgp::composed::{KeyType, SecretKeyParamsBuilder, SignedSecretKey, SignedPublicKey, Deserializable, StandaloneSignature};
+use pgp::packet::{SignatureConfig, SignatureType, Subpacket, SubpacketData};
+use pgp::types::{Password, KeyDetails};
 use pgp::ser::Serialize as PgpSerialize;
+use rand::thread_rng;
+use std::time::SystemTime;
 
 /// Utility for key generation, encryption, signing, and verification.
 pub struct CryptoUtils {
@@ -77,23 +79,30 @@ impl CryptoUtils {
         Ok(plaintext)
     }
 
-    /// Generate and securely store a new PGP key pair.
+    /// Convert password to PGP Password type
+    fn to_pgp_password(&self) -> Password {
+        Password::from(self.password.as_str())
+    }
+
+    /// Generate and securely store a new PGP key pair using Ed25519.
     /// Returns the public key armored as a String.
     pub fn generate_key_pair(&self, username: &str) -> Result<String> {
+        log::info!("Generating Ed25519 PGP keypair for user: {}", username);
+
         let key_params = SecretKeyParamsBuilder::default()
-            .key_type(KeyType::Rsa(2048))
+            .key_type(KeyType::Ed25519Legacy)
             .can_sign(true)
             .can_certify(true)
             .primary_user_id(username.to_string())
             .build()?;
 
-        let secret_key = key_params.generate()?;
-        let signed_secret_key = secret_key.sign(|| "password".to_string())?;
-        let public_key = signed_secret_key.public_key().sign(&signed_secret_key, || "password".to_string())?;
-        
+        let secret_key = key_params.generate(thread_rng())?;
+        let signed_secret_key = secret_key.sign(&mut thread_rng(), &self.to_pgp_password())?;
+        let public_key = SignedPublicKey::from(signed_secret_key.clone());
+
         let secret_key_armored = signed_secret_key.to_armored_string(Default::default())?;
         let public_key_armored = public_key.to_armored_string(Default::default())?;
-        
+
         let encrypted = self.encrypt_private_key(secret_key_armored.as_bytes())?;
         let priv_path = self.key_dir.join(format!("{}_private_key.enc", username));
         let pub_path = self.key_dir.join(format!("{}_public_key.asc", username));
@@ -114,6 +123,7 @@ impl CryptoUtils {
     }
 
     /// Load the public key for the given username.
+    #[allow(dead_code)] // Part of public API for future use
     pub fn load_public_key(&self, username: &str) -> Result<SignedPublicKey> {
         let path = self.key_dir.join(format!("{}_public_key.asc", username));
         let armored = fs::read_to_string(&path)?;
@@ -143,26 +153,37 @@ impl CryptoUtils {
         let hash = hasher.finish();
         let message_to_sign = hex::encode(hash);
 
-        let signature = match secret_key.create_signature(|| "password".to_string(), HashAlgorithm::default(), message_to_sign.as_bytes()) {
-            Ok(sig) => {
-                log::info!("Successfully created PGP signature for username: '{}'", username);
-                sig
-            }
-            Err(e) => {
-                log::error!("Failed to create PGP signature for username '{}': {}", username, e);
-                return Err(e.into());
-            }
-        };
-        let signature_bytes = match PgpSerialize::to_bytes(&signature) {
-            Ok(bytes) => {
-                log::info!("Successfully serialized signature for username: '{}'", username);
-                bytes
-            }
-            Err(e) => {
-                log::error!("Failed to serialize signature for username '{}': {}", username, e);
-                return Err(e.into());
-            }
-        };
+        // Create signature using SignatureConfig (pgp 0.16 API)
+        let mut config = SignatureConfig::from_key(
+            thread_rng(),
+            &secret_key.primary_key,
+            SignatureType::Binary,
+        )?;
+
+        // Add required subpackets
+        config.hashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::IssuerFingerprint(
+                secret_key.primary_key.fingerprint(),
+            ))?,
+            Subpacket::critical(SubpacketData::SignatureCreationTime(
+                SystemTime::now().into(),
+            ))?,
+        ];
+
+        config.unhashed_subpackets = vec![
+            Subpacket::regular(SubpacketData::Issuer(secret_key.primary_key.key_id()))?
+        ];
+
+        let signature = config.sign(
+            &secret_key.primary_key,
+            &self.to_pgp_password(),
+            message_to_sign.as_bytes(),
+        )?;
+
+        // Wrap in StandaloneSignature and serialize
+        let standalone = StandaloneSignature::new(signature);
+        let signature_bytes = PgpSerialize::to_bytes(&standalone)?;
+
         log::info!("Successfully signed message for username: '{}'", username);
         Ok(general_purpose::STANDARD.encode(signature_bytes))
     }
@@ -182,7 +203,7 @@ impl CryptoUtils {
             }
         }
     }
-    
+
     fn verify_signature_inner(
         &self,
         public_key_armored: &str,
@@ -192,18 +213,25 @@ impl CryptoUtils {
         // Parse the armored signature (not base64)
         let signature = if signature_armored.starts_with("-----BEGIN PGP SIGNATURE-----") {
             // It's an armored signature, parse it directly
-            let (sig, _headers) = pgp::composed::StandaloneSignature::from_string(signature_armored)?;
+            let (sig, _headers) = StandaloneSignature::from_string(signature_armored)?;
             sig
         } else {
             // Fall back to base64 decoding for backward compatibility
             let signature_bytes = general_purpose::STANDARD.decode(signature_armored)?;
-            pgp::composed::StandaloneSignature::from_bytes(signature_bytes.as_slice())?
+            StandaloneSignature::from_bytes(signature_bytes.as_slice())?
         };
 
         let (public_key, _headers) = SignedPublicKey::from_string(public_key_armored)?;
 
-        // Verify the signature against the message
-        match signature.verify(&public_key, message.as_bytes()) {
+        // Hash the message the same way as sign_message does
+        use openssl::sha::Sha256;
+        let mut hasher = Sha256::new();
+        hasher.update(message.as_bytes());
+        let hash = hasher.finish();
+        let message_to_verify = hex::encode(hash);
+
+        // Verify the signature against the hashed message
+        match signature.verify(&public_key.primary_key, message_to_verify.as_bytes()) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -219,9 +247,9 @@ mod tests {
     fn test_new_creates_key_directory() {
         let temp_dir = tempdir().unwrap();
         let key_dir = temp_dir.path().join("keys");
-        
+
         let _crypto = CryptoUtils::new(key_dir.clone(), "test_password".to_string()).unwrap();
-        
+
         assert!(key_dir.exists());
     }
 
@@ -229,11 +257,11 @@ mod tests {
     fn test_derive_key_consistency() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         let salt = [1u8; 16];
         let key1 = crypto.derive_key(&salt).unwrap();
         let key2 = crypto.derive_key(&salt).unwrap();
-        
+
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32);
     }
@@ -242,11 +270,11 @@ mod tests {
     fn test_encrypt_decrypt_private_key() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         let test_data = b"test private key data";
         let encrypted = crypto.encrypt_private_key(test_data).unwrap();
         let decrypted = crypto.decrypt_private_key(&encrypted).unwrap();
-        
+
         assert_eq!(test_data, &decrypted[..]);
     }
 
@@ -254,15 +282,15 @@ mod tests {
     fn test_generate_key_pair() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         let public_key = crypto.generate_key_pair("test_user").unwrap();
-        
+
         assert!(!public_key.is_empty());
         assert!(public_key.contains("BEGIN PGP PUBLIC KEY BLOCK"));
-        
+
         let private_key_path = temp_dir.path().join("test_user_private_key.enc");
         let public_key_path = temp_dir.path().join("test_user_public_key.asc");
-        
+
         assert!(private_key_path.exists());
         assert!(public_key_path.exists());
     }
@@ -271,12 +299,12 @@ mod tests {
     fn test_load_keys_after_generation() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         crypto.generate_key_pair("test_user").unwrap();
-        
+
         let secret_key = crypto.load_private_key("test_user").unwrap();
         let public_key = crypto.load_public_key("test_user").unwrap();
-        
+
         assert!(!secret_key.to_armored_string(Default::default()).unwrap().is_empty());
         assert!(!public_key.to_armored_string(Default::default()).unwrap().is_empty());
     }
@@ -285,12 +313,12 @@ mod tests {
     fn test_sign_message() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         crypto.generate_key_pair("test_user").unwrap();
-        
+
         let message = "test message to sign";
         let signature = crypto.sign_message("test_user", message).unwrap();
-        
+
         assert!(!signature.is_empty());
     }
 
@@ -298,11 +326,11 @@ mod tests {
     fn test_verify_signature() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         let public_key = crypto.generate_key_pair("test_user").unwrap();
         let message = "test message to sign";
         let signature = crypto.sign_message("test_user", message).unwrap();
-        
+
         let is_valid = crypto.verify_signature(&public_key, message, &signature);
         assert!(is_valid);
     }
@@ -311,35 +339,35 @@ mod tests {
     fn test_verify_signature_invalid_message() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         let public_key = crypto.generate_key_pair("test_user").unwrap();
         let message = "test message to sign";
         let signature = crypto.sign_message("test_user", message).unwrap();
-        
+
         let is_valid = crypto.verify_signature(&public_key, "different message", &signature);
-        assert!(is_valid);
+        assert!(!is_valid);
     }
 
     #[test]
     fn test_verify_signature_invalid_public_key() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         crypto.generate_key_pair("test_user").unwrap();
         let other_public_key = crypto.generate_key_pair("other_user").unwrap();
-        
+
         let message = "test message to sign";
         let signature = crypto.sign_message("test_user", message).unwrap();
-        
+
         let is_valid = crypto.verify_signature(&other_public_key, message, &signature);
-        assert!(is_valid);
+        assert!(!is_valid);
     }
 
     #[test]
     fn test_load_nonexistent_key() {
         let temp_dir = tempdir().unwrap();
         let crypto = CryptoUtils::new(temp_dir.path().to_path_buf(), "test_password".to_string()).unwrap();
-        
+
         let result = crypto.load_private_key("nonexistent_user");
         assert!(result.is_err());
     }

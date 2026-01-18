@@ -141,7 +141,7 @@ async fn generate_server_keys() -> anyhow::Result<()> {
 
     // Generate key pair for the server's client_id
     println!("Generating key pair for server client_id: {}", client_id);
-    let public_key = crypto.generate_key_pair(&client_id)?;
+    let _public_key = crypto.generate_key_pair(&client_id)?;
 
     println!("Server key pair generated successfully!");
     println!("Public key stored at: {}", pub_path.display());
@@ -191,12 +191,24 @@ async fn main() -> anyhow::Result<()> {
     }
     let password = load_seed_phrase(&secret_path_buf)?;
 
+    // Initialize client ID early (needed for keypair check)
+    let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "default".to_string());
+
     // Initialize utilities
     let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), password.clone())?;
+
+    // Check if server keypair exists, generate if missing (first run auto-setup)
+    let priv_path = PathBuf::from(&keys_dir).join(format!("{}_private_key.enc", client_id));
+    let pub_path = PathBuf::from(&keys_dir).join(format!("{}_public_key.asc", client_id));
+    if !priv_path.exists() || !pub_path.exists() {
+        log::info!("Server keypair not found for client_id '{}', generating...", client_id);
+        crypto.generate_key_pair(&client_id)?;
+        log::info!("Server keypair generated successfully.");
+    }
+
     let db = DbUtils::new(&db_path).await?;
 
-    // Initialize mixnet client storage path and client ID (with defaults)
-    let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "default".to_string());
+    // Initialize mixnet client storage path
     let storage_dir =
         std::env::var("NYM_SDK_STORAGE").unwrap_or_else(|_| format!("storage/{}", client_id));
     // Ensure mixnet SDK storage directory exists
