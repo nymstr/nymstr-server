@@ -1,6 +1,5 @@
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
-use hex;
 use openssl::hash::MessageDigest;
 use openssl::pkcs5::pbkdf2_hmac;
 use openssl::rand::rand_bytes;
@@ -139,6 +138,7 @@ impl CryptoUtils {
     }
 
     /// Sign a message using the user's private key. Returns a base64-encoded signature.
+    /// PGP handles hashing internally - we sign the raw message.
     pub fn sign_message(&self, username: &str, message: &str) -> Result<String> {
         log::info!("Attempting to sign message for username: '{}' (length: {} bytes)", username, message.len());
         let secret_key = match self.load_private_key(username) {
@@ -151,14 +151,6 @@ impl CryptoUtils {
                 return Err(e);
             }
         };
-
-        // Always hash the message before signing for consistent behavior
-        log::info!("Hashing message ({} bytes) before signing", message.len());
-        use openssl::sha::Sha256;
-        let mut hasher = Sha256::new();
-        hasher.update(message.as_bytes());
-        let hash = hasher.finish();
-        let message_to_sign = hex::encode(hash);
 
         // Create signature using SignatureConfig (pgp 0.16 API)
         let mut config = SignatureConfig::from_key(
@@ -184,7 +176,7 @@ impl CryptoUtils {
         let signature = config.sign(
             &secret_key.primary_key,
             &self.to_pgp_password(),
-            message_to_sign.as_bytes(),
+            message.as_bytes(),
         )?;
 
         // Wrap in StandaloneSignature and serialize
@@ -230,15 +222,8 @@ impl CryptoUtils {
 
         let (public_key, _headers) = SignedPublicKey::from_string(public_key_armored)?;
 
-        // Hash the message the same way as sign_message does
-        use openssl::sha::Sha256;
-        let mut hasher = Sha256::new();
-        hasher.update(message.as_bytes());
-        let hash = hasher.finish();
-        let message_to_verify = hex::encode(hash);
-
-        // Verify the signature against the hashed message
-        match signature.verify(&public_key.primary_key, message_to_verify.as_bytes()) {
+        // PGP handles hashing internally - verify against raw message
+        match signature.verify(&public_key.primary_key, message.as_bytes()) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
