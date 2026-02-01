@@ -195,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
     let client_id = std::env::var("NYM_CLIENT_ID").unwrap_or_else(|_| "default".to_string());
 
     // Initialize utilities
-    let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), password.clone())?;
+    let crypto = CryptoUtils::new(PathBuf::from(&keys_dir), password)?;
 
     // Check if server keypair exists, generate if missing (first run auto-setup)
     let priv_path = PathBuf::from(&keys_dir).join(format!("{}_private_key.enc", client_id));

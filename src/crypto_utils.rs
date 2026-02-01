@@ -5,6 +5,7 @@ use openssl::hash::MessageDigest;
 use openssl::pkcs5::pbkdf2_hmac;
 use openssl::rand::rand_bytes;
 use openssl::symm::{Cipher, Crypter, Mode};
+use secrecy::{ExposeSecret, SecretString};
 use std::fs;
 use std::path::PathBuf;
 use pgp::composed::{KeyType, SecretKeyParamsBuilder, SignedSecretKey, SignedPublicKey, Deserializable, StandaloneSignature};
@@ -13,26 +14,32 @@ use pgp::types::{Password, KeyDetails};
 use pgp::ser::Serialize as PgpSerialize;
 use rand::thread_rng;
 use std::time::SystemTime;
+use zeroize::Zeroize;
 
 /// Utility for key generation, encryption, signing, and verification.
+/// Password is stored securely and zeroed from memory when dropped.
 pub struct CryptoUtils {
     key_dir: PathBuf,
-    password: String,
+    password: SecretString,
 }
 
 impl CryptoUtils {
     /// Create a new CryptoUtils, ensuring the key directory exists.
-    pub fn new(key_dir: PathBuf, password: String) -> Result<Self> {
+    /// The password is stored securely and will be zeroed from memory when dropped.
+    pub fn new(key_dir: PathBuf, mut password: String) -> Result<Self> {
         if !key_dir.exists() {
             fs::create_dir_all(&key_dir)?;
         }
-        Ok(Self { key_dir, password })
+        // Convert to SecretString and zeroize the original
+        let secret_password = SecretString::new(password.clone());
+        password.zeroize();
+        Ok(Self { key_dir, password: secret_password })
     }
 
     fn derive_key(&self, salt: &[u8]) -> Result<[u8; 32]> {
         let mut key = [0u8; 32];
         pbkdf2_hmac(
-            self.password.as_bytes(),
+            self.password.expose_secret().as_bytes(),
             salt,
             100_000,
             MessageDigest::sha256(),
@@ -81,7 +88,7 @@ impl CryptoUtils {
 
     /// Convert password to PGP Password type
     fn to_pgp_password(&self) -> Password {
-        Password::from(self.password.as_str())
+        Password::from(self.password.expose_secret().as_str())
     }
 
     /// Generate and securely store a new PGP key pair using Ed25519.

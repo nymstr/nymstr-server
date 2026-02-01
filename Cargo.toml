@@ -18,6 +18,8 @@ base64 = "0.21"
 openssl = "0.10"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
 nym-sdk = { git = "https://github.com/nymtech/nym", branch = "master" }
+zeroize = { version = "1.7", features = ["derive"] }
+secrecy = "0.8"
 uuid = { version = "1", features = ["v4"] }
 pgp = "0.16"
 rand = "0.8"
