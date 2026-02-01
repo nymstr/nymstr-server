@@ -8,7 +8,7 @@ use nym_sdk::mixnet::{
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Handler for incoming mixnet messages and command processing.

@@ -301,6 +301,7 @@ impl DbUtils {
     }
 
     /// Cleanup expired messages. Call periodically.
+    #[allow(dead_code)]
     pub async fn cleanup_expired_messages(&self) -> Result<u64> {
         let res = sqlx::query("DELETE FROM pending_messages WHERE expiresAt < unixepoch()")
             .execute(&self.pool)
@@ -309,6 +310,7 @@ impl DbUtils {
     }
 
     /// Get count of pending messages for a user (useful for status).
+    #[allow(dead_code)]
     pub async fn get_pending_message_count(&self, recipient: &str) -> Result<i64> {
         let row = sqlx::query(
             "SELECT COUNT(*) FROM pending_messages WHERE recipient = ? AND expiresAt > unixepoch()"

@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 
 /// Standardized error response codes
+#[allow(dead_code)]
 pub mod error_codes {
     pub const MISSING_FIELDS: &str = "MISSING_FIELDS";
     pub const INVALID_USERNAME: &str = "INVALID_USERNAME";
