@@ -2,7 +2,6 @@ use crate::crypto_utils::CryptoUtils;
 use crate::db_utils::{DbUtils, QueryResult};
 use crate::pending::{PendingEntry, PendingGroupData, PendingLoginData, PendingUserData};
 use crate::rate_limiter::RateLimiter;
-use crate::response::{error_codes, error_response};
 use nym_sdk::mixnet::{
     AnonymousSenderTag, MixnetClientSender, MixnetMessageSender, ReconstructedMessage,
 };
@@ -298,7 +297,7 @@ impl MessageUtils {
                 log::error!("Database error checking username '{}': {}", username, e);
                 self.send_encapsulated_reply(
                     sender_tag,
-                    error_response(error_codes::INTERNAL_ERROR, "Database error"),
+                    json!({"status": "error", "error_code": "INTERNAL_ERROR", "message": "Database error"}).to_string(),
                     "challengeResponse",
                     Some("registration"),
                 ).await;
@@ -308,7 +307,7 @@ impl MessageUtils {
         if user_exists {
             self.send_encapsulated_reply(
                 sender_tag,
-                error_response(error_codes::USER_EXISTS, "Username already in use"),
+                json!({"status": "error", "error_code": "USER_EXISTS", "message": "Username already in use"}).to_string(),
                 "challengeResponse",
                 Some("registration"),
             )
