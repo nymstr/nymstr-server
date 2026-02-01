@@ -1,6 +1,8 @@
 use anyhow::Result;
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
+use std::time::Duration;
 
 /// Result of a unified query - can be either a user or a group
 #[derive(Debug, Clone)]
@@ -27,9 +29,17 @@ pub struct DbUtils {
 
 impl DbUtils {
     /// Open or create the SQLite database at the specified path.
+    ///
+    /// Configures the connection pool with:
+    /// - max 5 connections (appropriate for SQLite's single-writer model)
+    /// - 3 second acquire timeout to fail fast on overload
     pub async fn new<P: AsRef<Path>>(db_path: P) -> Result<Self> {
         let db_url = format!("sqlite:{}?mode=rwc", db_path.as_ref().display());
-        let pool = SqlitePool::connect(&db_url).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&db_url)
+            .await?;
         sqlx::query(
             r#"
             PRAGMA journal_mode = WAL;
