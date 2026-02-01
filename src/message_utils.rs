@@ -9,6 +9,36 @@ use uuid::Uuid;
 use chrono;
 use base64;
 
+/// Standardized error response codes
+pub mod error_codes {
+    pub const MISSING_FIELDS: &str = "MISSING_FIELDS";
+    pub const INVALID_USERNAME: &str = "INVALID_USERNAME";
+    pub const INVALID_GROUP_ID: &str = "INVALID_GROUP_ID";
+    pub const USER_EXISTS: &str = "USER_EXISTS";
+    pub const USER_NOT_FOUND: &str = "USER_NOT_FOUND";
+    pub const INVALID_SIGNATURE: &str = "INVALID_SIGNATURE";
+    pub const RATE_LIMITED: &str = "RATE_LIMITED";
+    pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+    pub const INVALID_FORMAT: &str = "INVALID_FORMAT";
+}
+
+/// Create a standardized error response JSON
+fn error_response(code: &str, message: &str) -> String {
+    json!({
+        "status": "error",
+        "error_code": code,
+        "message": message
+    }).to_string()
+}
+
+/// Create a standardized success response JSON with data
+fn success_response(data: Value) -> String {
+    json!({
+        "status": "success",
+        "data": data
+    }).to_string()
+}
+
 /// Sliding window rate limiter to prevent brute-force attacks on authentication endpoints.
 /// Tracks attempts per sender_tag within a configurable time window.
 struct RateLimiter {
@@ -230,9 +260,10 @@ impl MessageUtils {
                     "login" => self.handle_login_unified(payload, sender_tag, sender_username).await,
                     "loginResponse" => self.handle_login_response_unified(payload, sender_tag).await,
                     "send" => self.handle_send_unified(payload, sender_tag, sender_username).await,
+                    "fetchPending" => self.handle_fetch_pending_unified(payload, sender_tag, sender_username).await,
                     "keyPackageRequest" => self.handle_key_package_request_unified(payload, sender_tag, sender_username, recipient_username).await,
                     "keyPackageResponse" => self.handle_key_package_response_unified(payload, sender_tag, sender_username, recipient_username).await,
-                    "groupWelcome" => self.handle_group_welcome_unified(payload, sender_tag, sender_username, recipient_username).await,
+                    "p2pWelcome" => self.handle_p2p_welcome_unified(payload, sender_tag, sender_username, recipient_username).await,
                     "groupJoinResponse" => self.handle_group_join_response_unified(payload, sender_tag, sender_username, recipient_username).await,
                     _ => log::error!("Unknown unified action: {}", action),
                 }
@@ -272,7 +303,14 @@ impl MessageUtils {
             .and_then(Value::as_str);
 
         if let Some(identifier) = identifier {
-            match self.db.query_by_identifier(identifier).await.unwrap_or(None) {
+            let query_result = match self.db.query_by_identifier(identifier).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::error!("Database query failed for identifier '{}': {}", identifier, e);
+                    None
+                }
+            };
+            match query_result {
                 Some(QueryResult::User { username, public_key, .. }) => {
                     let reply = json!({
                         "type": "user",
@@ -355,16 +393,24 @@ impl MessageUtils {
             .await;
             return;
         }
-        if self
-            .db
-            .get_user_by_username(username)
-            .await
-            .unwrap_or(None)
-            .is_some()
-        {
+        let user_exists = match self.db.get_user_by_username(username).await {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                log::error!("Database error checking username '{}': {}", username, e);
+                self.send_encapsulated_reply(
+                    sender_tag,
+                    error_response(error_codes::INTERNAL_ERROR, "Database error"),
+                    "challengeResponse",
+                    Some("registration"),
+                ).await;
+                return;
+            }
+        };
+        if user_exists {
             self.send_encapsulated_reply(
                 sender_tag,
-                "error: username already in use".into(),
+                error_response(error_codes::USER_EXISTS, "Username already in use"),
                 "challengeResponse",
                 Some("registration"),
             )
@@ -985,7 +1031,14 @@ impl MessageUtils {
             .and_then(Value::as_str);
 
         if let Some(identifier) = identifier {
-            match self.db.query_by_identifier(identifier).await.unwrap_or(None) {
+            let query_result = match self.db.query_by_identifier(identifier).await {
+                Ok(result) => result,
+                Err(e) => {
+                    log::error!("Database query failed for identifier '{}': {}", identifier, e);
+                    None
+                }
+            };
+            match query_result {
                 Some(QueryResult::User { username, public_key, .. }) => {
                     let response_payload = json!({
                         "type": "user",
@@ -1170,25 +1223,47 @@ impl MessageUtils {
 
                 // Look up recipient's Nym address and forward message
                 if let Ok(Some((_username, _public_key, target_sender_tag))) = self.db.get_user_by_username(recipient).await {
-                    if let Ok(recipient_tag) = AnonymousSenderTag::try_from_base58_string(&target_sender_tag) {
-                        // Forward the MLS encrypted payload as-is
-                        let message_payload = payload.clone();
+                    // Check if recipient has a valid sender tag (is online)
+                    let is_online = !target_sender_tag.is_empty() &&
+                        AnonymousSenderTag::try_from_base58_string(&target_sender_tag).is_ok();
 
-                        // Forward message to recipient using unified format (type: "message", action: "send")
-                        self.send_unified_message(recipient_tag, message_payload, "send", recipient, sender_username).await;
-                        log::info!("Successfully forwarded MLS message from {} to {}", sender_username, recipient);
+                    if is_online {
+                        if let Ok(recipient_tag) = AnonymousSenderTag::try_from_base58_string(&target_sender_tag) {
+                            // Forward the MLS encrypted payload as-is
+                            let message_payload = payload.clone();
 
-                        // Send success response to sender
-                        let response_payload = json!({
-                            "status": "delivered",
-                            "recipient": recipient,
-                            "message": "Message delivered successfully"
-                        });
-                        self.send_unified_reply(sender_tag, response_payload, "sendResponse", sender_username).await;
+                            // Forward message to recipient using unified format (type: "message", action: "send")
+                            self.send_unified_message(recipient_tag, message_payload, "send", recipient, sender_username).await;
+                            log::info!("Successfully forwarded MLS message from {} to {}", sender_username, recipient);
+
+                            // Send success response to sender
+                            let response_payload = json!({
+                                "status": "delivered",
+                                "recipient": recipient,
+                                "message": "Message delivered successfully"
+                            });
+                            self.send_unified_reply(sender_tag, response_payload, "sendResponse", sender_username).await;
+                        }
                     } else {
-                        log::error!("Invalid sender tag for recipient {}: {}", recipient, target_sender_tag);
-                        let response_payload = json!({"status": "error", "message": "recipient address invalid"});
-                        self.send_unified_reply(sender_tag, response_payload, "sendResponse", sender_username).await;
+                        // Recipient is offline - queue message for later delivery
+                        log::info!("Recipient {} is offline, queueing message from {}", recipient, sender_username);
+                        let payload_str = serde_json::to_string(payload).unwrap_or_default();
+                        match self.db.queue_pending_message(recipient, sender_username, &payload_str, "send").await {
+                            Ok(msg_id) => {
+                                log::info!("Queued message {} for offline recipient {}", msg_id, recipient);
+                                let response_payload = json!({
+                                    "status": "queued",
+                                    "recipient": recipient,
+                                    "message": "Recipient offline, message queued for delivery"
+                                });
+                                self.send_unified_reply(sender_tag, response_payload, "sendResponse", sender_username).await;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to queue message for {}: {}", recipient, e);
+                                let response_payload = json!({"status": "error", "message": "failed to queue message"});
+                                self.send_unified_reply(sender_tag, response_payload, "sendResponse", sender_username).await;
+                            }
+                        }
                     }
                 } else {
                     log::info!("Recipient {} not found in database", recipient);
@@ -1203,6 +1278,91 @@ impl MessageUtils {
         } else {
             let response_payload = json!({"status": "error", "message": "missing conversation_id or mls_message"});
             self.send_unified_reply(sender_tag, response_payload, "sendResponse", sender_username).await;
+        }
+    }
+
+    async fn handle_fetch_pending_unified(&mut self, payload: &Value, sender_tag: AnonymousSenderTag, sender_username: &str) {
+        log::info!("Handling fetchPending request from {}", sender_username);
+
+        // Verify signature - user must sign "fetchPending:{username}:{timestamp}"
+        let timestamp = payload.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+        let signature = payload.get("signature").and_then(Value::as_str);
+
+        // Get user's public key for verification
+        let user_data = match self.db.get_user_by_username(sender_username).await {
+            Ok(Some(data)) => data,
+            Ok(None) => {
+                log::warn!("fetchPending: user {} not found", sender_username);
+                let response_payload = json!({"status": "error", "message": "user not registered"});
+                self.send_unified_reply(sender_tag, response_payload, "fetchPendingResponse", sender_username).await;
+                return;
+            }
+            Err(e) => {
+                log::error!("fetchPending: database error: {}", e);
+                let response_payload = json!({"status": "error", "message": "database error"});
+                self.send_unified_reply(sender_tag, response_payload, "fetchPendingResponse", sender_username).await;
+                return;
+            }
+        };
+
+        let public_key = &user_data.1;
+
+        // Verify signature
+        if let Some(sig) = signature {
+            let message_to_verify = format!("fetchPending:{}:{}", sender_username, timestamp);
+            if !self.crypto.verify_signature(public_key, &message_to_verify, sig) {
+                log::warn!("fetchPending: invalid signature from {}", sender_username);
+                let response_payload = json!({"status": "error", "message": "invalid signature"});
+                self.send_unified_reply(sender_tag, response_payload, "fetchPendingResponse", sender_username).await;
+                return;
+            }
+        } else {
+            log::warn!("fetchPending: missing signature from {}", sender_username);
+            let response_payload = json!({"status": "error", "message": "missing signature"});
+            self.send_unified_reply(sender_tag, response_payload, "fetchPendingResponse", sender_username).await;
+            return;
+        }
+
+        // Fetch pending messages from database
+        match self.db.get_pending_messages(sender_username).await {
+            Ok(messages) => {
+                let message_ids: Vec<i64> = messages.iter().map(|(id, _, _, _, _)| *id).collect();
+                let message_list: Vec<Value> = messages.iter().map(|(id, sender, payload_str, action, created_at)| {
+                    // Parse the stored payload JSON
+                    let payload_value: Value = serde_json::from_str(payload_str).unwrap_or(json!({}));
+                    json!({
+                        "id": id,
+                        "sender": sender,
+                        "payload": payload_value,
+                        "action": action,
+                        "timestamp": created_at
+                    })
+                }).collect();
+
+                let count = message_list.len();
+                log::info!("fetchPending: returning {} pending messages to {}", count, sender_username);
+
+                let response_payload = json!({
+                    "status": "success",
+                    "messages": message_list,
+                    "count": count
+                });
+                self.send_unified_reply(sender_tag, response_payload, "fetchPendingResponse", sender_username).await;
+
+                // Delete delivered messages
+                if !message_ids.is_empty() {
+                    if let Err(e) = self.db.delete_pending_messages(&message_ids).await {
+                        log::error!("fetchPending: failed to delete messages: {}", e);
+                    } else {
+                        log::debug!("fetchPending: deleted {} delivered messages", message_ids.len());
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("fetchPending: failed to get messages: {}", e);
+                let response_payload = json!({"status": "error", "message": "failed to fetch messages"});
+                self.send_unified_reply(sender_tag, response_payload, "fetchPendingResponse", sender_username).await;
+            }
         }
     }
 
@@ -1249,16 +1409,17 @@ impl MessageUtils {
         }
     }
 
-    async fn handle_group_welcome_unified(&mut self, payload: &Value, sender_tag: AnonymousSenderTag, sender_username: &str, recipient_username: Option<&str>) {
-        log::info!("Handling group welcome message from {}", sender_username);
+    async fn handle_p2p_welcome_unified(&mut self, payload: &Value, sender_tag: AnonymousSenderTag, sender_username: &str, recipient_username: Option<&str>) {
+        log::info!("Handling P2P welcome message from {}", sender_username);
 
-        // Route the group welcome message to the intended recipient
+        // Route the P2P welcome message to the intended recipient
+        // This is for direct messaging handshake (1:1 conversations)
         if let Some(recipient) = recipient_username {
             if let Some(recipient_tag) = self.get_user_sender_tag(recipient).await {
-                log::info!("Routing group welcome from {} to {}", sender_username, recipient);
-                self.send_unified_message(recipient_tag, payload.clone(), "groupWelcome", recipient, sender_username).await;
+                log::info!("Routing P2P welcome from {} to {}", sender_username, recipient);
+                self.send_unified_message(recipient_tag, payload.clone(), "p2pWelcome", recipient, sender_username).await;
             } else {
-                log::warn!("Recipient {} not found for group welcome", recipient);
+                log::warn!("Recipient {} not found for P2P welcome", recipient);
                 let error_payload = json!({
                     "status": "error",
                     "message": format!("Recipient {} not found or offline", recipient)
@@ -1266,7 +1427,7 @@ impl MessageUtils {
                 self.send_unified_reply(sender_tag, error_payload, "groupJoinResponse", sender_username).await;
             }
         } else {
-            log::error!("Group welcome message missing recipient field");
+            log::error!("P2P welcome message missing recipient field");
             let error_payload = json!({
                 "status": "error",
                 "message": "Missing recipient field"

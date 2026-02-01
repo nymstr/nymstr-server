@@ -50,6 +50,18 @@ impl DbUtils {
                 createdAt    TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_groups_public ON groups(isPublic);
+
+            CREATE TABLE IF NOT EXISTS pending_messages (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient    TEXT NOT NULL,
+                sender       TEXT NOT NULL,
+                payload      TEXT NOT NULL,
+                action       TEXT NOT NULL DEFAULT 'send',
+                createdAt    INTEGER NOT NULL DEFAULT (unixepoch()),
+                expiresAt    INTEGER NOT NULL DEFAULT (unixepoch() + 604800)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_recipient ON pending_messages(recipient);
+            CREATE INDEX IF NOT EXISTS idx_pending_expires ON pending_messages(expiresAt);
             "#,
         )
         .execute(&pool)
@@ -222,6 +234,79 @@ impl DbUtils {
         }
 
         Ok(None)
+    }
+
+    // ===== PENDING MESSAGE OPERATIONS =====
+
+    /// Queue a message for an offline user. Returns the message ID.
+    pub async fn queue_pending_message(
+        &self,
+        recipient: &str,
+        sender: &str,
+        payload: &str,
+        action: &str,
+    ) -> Result<i64> {
+        let res = sqlx::query(
+            "INSERT INTO pending_messages (recipient, sender, payload, action) VALUES (?, ?, ?, ?)"
+        )
+        .bind(recipient)
+        .bind(sender)
+        .bind(payload)
+        .bind(action)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.last_insert_rowid())
+    }
+
+    /// Get all pending messages for a user. Returns Vec<(id, sender, payload, action, createdAt)>.
+    pub async fn get_pending_messages(
+        &self,
+        recipient: &str,
+    ) -> Result<Vec<(i64, String, String, String, i64)>> {
+        let rows = sqlx::query(
+            "SELECT id, sender, payload, action, createdAt FROM pending_messages WHERE recipient = ? AND expiresAt > unixepoch() ORDER BY createdAt ASC"
+        )
+        .bind(recipient)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4))).collect())
+    }
+
+    /// Delete pending messages by IDs after successful delivery.
+    pub async fn delete_pending_messages(&self, ids: &[i64]) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "DELETE FROM pending_messages WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id);
+        }
+        let res = query.execute(&self.pool).await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Cleanup expired messages. Call periodically.
+    pub async fn cleanup_expired_messages(&self) -> Result<u64> {
+        let res = sqlx::query("DELETE FROM pending_messages WHERE expiresAt < unixepoch()")
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Get count of pending messages for a user (useful for status).
+    pub async fn get_pending_message_count(&self, recipient: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT COUNT(*) FROM pending_messages WHERE recipient = ? AND expiresAt > unixepoch()"
+        )
+        .bind(recipient)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get(0))
     }
 }
 
