@@ -9,6 +9,9 @@ on:
 jobs:
   add-to-project:
     runs-on: ubuntu-latest
+    if: >-
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), 
+      github.event.issue.author_association || github.event.pull_request.author_association)
     steps:
       - uses: actions/add-to-project@v1.0.2
         with:
