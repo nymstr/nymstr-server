@@ -1,117 +1,15 @@
-use crate::{crypto_utils::CryptoUtils, db_utils::{DbUtils, QueryResult}};
+use crate::crypto_utils::CryptoUtils;
+use crate::db_utils::{DbUtils, QueryResult};
+use crate::pending::{PendingEntry, PendingGroupData, PendingLoginData, PendingUserData};
+use crate::rate_limiter::RateLimiter;
+use crate::response::{error_codes, error_response};
 use nym_sdk::mixnet::{
     AnonymousSenderTag, MixnetClientSender, MixnetMessageSender, ReconstructedMessage,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use chrono;
-use base64;
-
-/// Standardized error response codes
-pub mod error_codes {
-    pub const MISSING_FIELDS: &str = "MISSING_FIELDS";
-    pub const INVALID_USERNAME: &str = "INVALID_USERNAME";
-    pub const INVALID_GROUP_ID: &str = "INVALID_GROUP_ID";
-    pub const USER_EXISTS: &str = "USER_EXISTS";
-    pub const USER_NOT_FOUND: &str = "USER_NOT_FOUND";
-    pub const INVALID_SIGNATURE: &str = "INVALID_SIGNATURE";
-    pub const RATE_LIMITED: &str = "RATE_LIMITED";
-    pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
-    pub const INVALID_FORMAT: &str = "INVALID_FORMAT";
-}
-
-/// Create a standardized error response JSON
-fn error_response(code: &str, message: &str) -> String {
-    json!({
-        "status": "error",
-        "error_code": code,
-        "message": message
-    }).to_string()
-}
-
-/// Create a standardized success response JSON with data
-fn success_response(data: Value) -> String {
-    json!({
-        "status": "success",
-        "data": data
-    }).to_string()
-}
-
-/// Sliding window rate limiter to prevent brute-force attacks on authentication endpoints.
-/// Tracks attempts per sender_tag within a configurable time window.
-struct RateLimiter {
-    attempts: HashMap<String, Vec<Instant>>,
-    max_attempts: usize,
-    window_secs: u64,
-}
-
-impl RateLimiter {
-    /// Create a new rate limiter with specified limits.
-    fn new(max_attempts: usize, window_secs: u64) -> Self {
-        Self {
-            attempts: HashMap::new(),
-            max_attempts,
-            window_secs,
-        }
-    }
-
-    /// Check if a request is allowed and record the attempt.
-    /// Returns true if allowed, false if rate limited.
-    fn check_and_record(&mut self, key: &str) -> bool {
-        let now = Instant::now();
-        let window = Duration::from_secs(self.window_secs);
-
-        let attempts = self.attempts.entry(key.to_string()).or_default();
-        // Remove old attempts outside the window
-        attempts.retain(|&t| now.duration_since(t) < window);
-
-        if attempts.len() >= self.max_attempts {
-            return false; // Rate limited
-        }
-
-        attempts.push(now);
-        true // Allowed
-    }
-
-    /// Remove empty entries to prevent memory growth.
-    fn cleanup(&mut self) {
-        self.attempts.retain(|_, v| !v.is_empty());
-    }
-}
-
-/// Wrapper for pending entries with TTL support
-struct PendingEntry<T> {
-    data: T,
-    created_at: Instant,
-}
-
-impl<T> PendingEntry<T> {
-    fn new(data: T) -> Self {
-        Self {
-            data,
-            created_at: Instant::now(),
-        }
-    }
-}
-
-/// Pending user registration data (username, public_key, nonce)
-type PendingUserData = (String, String, String);
-
-/// Pending login data (username, public_key, nonce)
-type PendingLoginData = (String, String, String);
-
-/// Pending group registration data
-struct PendingGroupData {
-    group_id: String,
-    name: String,
-    nym_address: String,
-    public_key: String,
-    description: Option<String>,
-    is_public: bool,
-    nonce: String,
-}
 
 /// Handler for incoming mixnet messages and command processing.
 pub struct MessageUtils {
