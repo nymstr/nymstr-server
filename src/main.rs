@@ -11,12 +11,12 @@ use crate::db_utils::DbUtils;
 use crate::env_loader::load_env;
 use crate::log_config::init_logging;
 use crate::message_utils::MessageUtils;
+use bip39::{Language, Mnemonic};
 use nym_sdk::mixnet::{MixnetClientBuilder, StoragePaths};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use std::io::{self, Write};
 use tokio_stream::StreamExt;
-use bip39::{Mnemonic, Language};
 
 /// Generate a new BIP39 seed phrase and store it
 fn generate_and_store_seed_phrase(secret_path: &PathBuf) -> anyhow::Result<String> {
@@ -56,7 +56,10 @@ fn generate_and_store_seed_phrase(secret_path: &PathBuf) -> anyhow::Result<Strin
 
     // Store the seed phrase
     std::fs::write(secret_path, &phrase)?;
-    std::fs::set_permissions(secret_path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    std::fs::set_permissions(
+        secret_path,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )?;
 
     Ok(phrase)
 }
@@ -85,7 +88,10 @@ fn load_seed_phrase(secret_path: &PathBuf) -> anyhow::Result<String> {
             .output()?;
 
         if !output.status.success() {
-            anyhow::bail!("GPG decryption failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "GPG decryption failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
@@ -118,7 +124,8 @@ async fn generate_server_keys() -> anyhow::Result<()> {
     std::fs::create_dir_all(&keys_dir)?;
 
     // Load or generate seed phrase
-    let secret_path = std::env::var("SECRET_PATH").unwrap_or_else(|_| "secrets/seed_phrase".to_string());
+    let secret_path =
+        std::env::var("SECRET_PATH").unwrap_or_else(|_| "secrets/seed_phrase".to_string());
     let secret_path_buf = PathBuf::from(&secret_path);
     if let Some(parent) = secret_path_buf.parent() {
         std::fs::create_dir_all(parent)?;
@@ -203,7 +210,10 @@ async fn main() -> anyhow::Result<()> {
     let priv_path = PathBuf::from(&keys_dir).join(format!("{}_private_key.enc", client_id));
     let pub_path = PathBuf::from(&keys_dir).join(format!("{}_public_key.asc", client_id));
     if !priv_path.exists() || !pub_path.exists() {
-        log::info!("Server keypair not found for client_id '{}', generating...", client_id);
+        log::info!(
+            "Server keypair not found for client_id '{}', generating...",
+            client_id
+        );
         crypto.generate_key_pair(&client_id)?;
         log::info!("Server keypair generated successfully.");
     }

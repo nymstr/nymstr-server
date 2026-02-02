@@ -121,7 +121,10 @@ impl DbUtils {
     fn validate_user_update_field(field: &str) -> Result<&str> {
         match field {
             "publicKey" | "senderTag" => Ok(field),
-            _ => Err(anyhow::anyhow!("Invalid field name for user update: {}", field)),
+            _ => Err(anyhow::anyhow!(
+                "Invalid field name for user update: {}",
+                field
+            )),
         }
     }
 
@@ -134,7 +137,10 @@ impl DbUtils {
         value: &str,
     ) -> Result<bool> {
         let validated_field = Self::validate_user_update_field(field)?;
-        let sql = format!("UPDATE users SET {} = ? WHERE username = ?", validated_field);
+        let sql = format!(
+            "UPDATE users SET {} = ? WHERE username = ?",
+            validated_field
+        );
         let res = sqlx::query(&sql)
             .bind(value)
             .bind(username)
@@ -195,13 +201,18 @@ impl DbUtils {
     }
 
     /// Get all public groups. Returns Vec<(groupId, name, nymAddress, publicKey, description)>.
-    pub async fn get_public_groups(&self) -> Result<Vec<(String, String, String, String, Option<String>)>> {
+    pub async fn get_public_groups(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, Option<String>)>> {
         let rows = sqlx::query(
             "SELECT groupId, name, nymAddress, publicKey, description FROM groups WHERE isPublic = 1 ORDER BY createdAt DESC"
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4))).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)))
+            .collect())
     }
 
     /// Update a group's Nym address (for re-registration after restart).
@@ -220,7 +231,9 @@ impl DbUtils {
     /// Returns QueryResult::User or QueryResult::Group if found.
     pub async fn query_by_identifier(&self, identifier: &str) -> Result<Option<QueryResult>> {
         // First check if it's a user
-        if let Some((username, public_key, sender_tag)) = self.get_user_by_username(identifier).await? {
+        if let Some((username, public_key, sender_tag)) =
+            self.get_user_by_username(identifier).await?
+        {
             return Ok(Some(QueryResult::User {
                 username,
                 public_key,
@@ -257,7 +270,7 @@ impl DbUtils {
         action: &str,
     ) -> Result<i64> {
         let res = sqlx::query(
-            "INSERT INTO pending_messages (recipient, sender, payload, action) VALUES (?, ?, ?, ?)"
+            "INSERT INTO pending_messages (recipient, sender, payload, action) VALUES (?, ?, ?, ?)",
         )
         .bind(recipient)
         .bind(sender)
@@ -279,7 +292,10 @@ impl DbUtils {
         .bind(recipient)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4))).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4)))
+            .collect())
     }
 
     /// Delete pending messages by IDs after successful delivery.
@@ -313,7 +329,7 @@ impl DbUtils {
     #[allow(dead_code)]
     pub async fn get_pending_message_count(&self, recipient: &str) -> Result<i64> {
         let row = sqlx::query(
-            "SELECT COUNT(*) FROM pending_messages WHERE recipient = ? AND expiresAt > unixepoch()"
+            "SELECT COUNT(*) FROM pending_messages WHERE recipient = ? AND expiresAt > unixepoch()",
         )
         .bind(recipient)
         .fetch_one(&self.pool)
@@ -326,15 +342,14 @@ impl DbUtils {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-    use tokio_test;
 
     #[tokio::test]
     async fn test_new_creates_database_and_tables() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        
+
         let _db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
+
         assert!(db_path.exists());
     }
 
@@ -343,17 +358,17 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
+
         let username = "test_user";
         let public_key = "test_public_key";
         let sender_tag = "test_sender_tag";
-        
+
         let added = db.add_user(username, public_key, sender_tag).await.unwrap();
         assert!(added);
-        
+
         let user = db.get_user_by_username(username).await.unwrap();
         assert!(user.is_some());
-        
+
         let (db_username, db_public_key, db_sender_tag) = user.unwrap();
         assert_eq!(db_username, username);
         assert_eq!(db_public_key, public_key);
@@ -365,7 +380,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
+
         let user = db.get_user_by_username("nonexistent_user").await.unwrap();
         assert!(user.is_none());
     }
@@ -375,15 +390,17 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
+
         let username = "test_user";
         let public_key = "test_public_key";
         let sender_tag = "test_sender_tag";
-        
+
         let added1 = db.add_user(username, public_key, sender_tag).await.unwrap();
         assert!(added1);
-        
-        let result = db.add_user(username, "different_key", "different_tag").await;
+
+        let result = db
+            .add_user(username, "different_key", "different_tag")
+            .await;
         assert!(result.is_err());
     }
 
@@ -392,16 +409,19 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
+
         let username = "test_user";
         let public_key = "test_public_key";
         let sender_tag = "test_sender_tag";
-        
+
         db.add_user(username, public_key, sender_tag).await.unwrap();
-        
-        let updated = db.update_user_field(username, "senderTag", "new_sender_tag").await.unwrap();
+
+        let updated = db
+            .update_user_field(username, "senderTag", "new_sender_tag")
+            .await
+            .unwrap();
         assert!(updated);
-        
+
         let user = db.get_user_by_username(username).await.unwrap().unwrap();
         assert_eq!(user.2, "new_sender_tag");
     }
@@ -411,8 +431,11 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
-        let updated = db.update_user_field("nonexistent_user", "senderTag", "new_tag").await.unwrap();
+
+        let updated = db
+            .update_user_field("nonexistent_user", "senderTag", "new_tag")
+            .await
+            .unwrap();
         assert!(!updated);
     }
 
@@ -421,16 +444,19 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
-        
+
         let username = "test_user";
         let public_key = "test_public_key";
         let sender_tag = "test_sender_tag";
-        
+
         db.add_user(username, public_key, sender_tag).await.unwrap();
-        
-        let updated = db.update_user_field(username, "publicKey", "new_public_key").await.unwrap();
+
+        let updated = db
+            .update_user_field(username, "publicKey", "new_public_key")
+            .await
+            .unwrap();
         assert!(updated);
-        
+
         let user = db.get_user_by_username(username).await.unwrap().unwrap();
         assert_eq!(user.1, "new_public_key");
     }
@@ -464,15 +490,25 @@ mod tests {
         db.add_user(username, "test_key", "test_tag").await.unwrap();
 
         // SQL injection attempt should be rejected
-        let result = db.update_user_field(username, "senderTag = 'injected'; DROP TABLE users; --", "value").await;
+        let result = db
+            .update_user_field(
+                username,
+                "senderTag = 'injected'; DROP TABLE users; --",
+                "value",
+            )
+            .await;
         assert!(result.is_err());
 
         // Invalid field names should be rejected
-        let result = db.update_user_field(username, "invalidField", "value").await;
+        let result = db
+            .update_user_field(username, "invalidField", "value")
+            .await;
         assert!(result.is_err());
 
         // username field should not be updatable (it's the primary key)
-        let result = db.update_user_field(username, "username", "new_username").await;
+        let result = db
+            .update_user_field(username, "username", "new_username")
+            .await;
         assert!(result.is_err());
 
         // Valid fields should still work

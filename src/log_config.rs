@@ -1,7 +1,7 @@
 use chrono::Local;
 use fern::{
-    Dispatch,
     colors::{Color, ColoredLevelConfig},
+    Dispatch,
 };
 use log::LevelFilter;
 use std::io;
