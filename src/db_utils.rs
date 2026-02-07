@@ -316,6 +316,30 @@ impl DbUtils {
         Ok(res.rows_affected())
     }
 
+    /// Delete pending messages by IDs, scoped to a specific recipient.
+    /// Prevents users from ACKing other users' messages.
+    pub async fn delete_pending_messages_for_recipient(
+        &self,
+        recipient: &str,
+        ids: &[i64],
+    ) -> Result<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "DELETE FROM pending_messages WHERE recipient = ? AND id IN ({})",
+            placeholders.join(",")
+        );
+        let mut query = sqlx::query(&sql);
+        query = query.bind(recipient);
+        for id in ids {
+            query = query.bind(id);
+        }
+        let res = query.execute(&self.pool).await?;
+        Ok(res.rows_affected())
+    }
+
     /// Cleanup expired messages. Call periodically.
     #[allow(dead_code)]
     pub async fn cleanup_expired_messages(&self) -> Result<u64> {
@@ -478,6 +502,45 @@ mod tests {
         assert_eq!(user1.0, "user1");
         assert_eq!(user2.0, "user2");
         assert_eq!(user3.0, "user3");
+    }
+
+    #[tokio::test]
+    async fn test_delete_pending_messages_for_recipient_scoped() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = DbUtils::new(db_path.to_str().unwrap()).await.unwrap();
+
+        // Queue messages for two different recipients
+        let id_alice = db
+            .queue_pending_message("alice", "bob", r#"{"msg":"hi alice"}"#, "send")
+            .await
+            .unwrap();
+        let id_charlie = db
+            .queue_pending_message("charlie", "bob", r#"{"msg":"hi charlie"}"#, "send")
+            .await
+            .unwrap();
+
+        // Alice tries to delete charlie's message — should not work
+        let deleted = db
+            .delete_pending_messages_for_recipient("alice", &[id_charlie])
+            .await
+            .unwrap();
+        assert_eq!(deleted, 0, "alice must not delete charlie's messages");
+
+        // Charlie's message should still be there
+        let charlie_msgs = db.get_pending_messages("charlie").await.unwrap();
+        assert_eq!(charlie_msgs.len(), 1);
+
+        // Alice deletes her own message — should work
+        let deleted = db
+            .delete_pending_messages_for_recipient("alice", &[id_alice])
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        // Alice has no more pending messages
+        let alice_msgs = db.get_pending_messages("alice").await.unwrap();
+        assert!(alice_msgs.is_empty());
     }
 
     #[tokio::test]

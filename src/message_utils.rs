@@ -175,7 +175,7 @@ impl MessageUtils {
                             .await
                     }
                     "send" => {
-                        self.handle_send_unified(payload, sender_tag, sender_username)
+                        self.handle_send_unified(payload, sender_tag, sender_username, recipient_username)
                             .await
                     }
                     "fetchPending" => {
@@ -209,6 +209,15 @@ impl MessageUtils {
                         )
                         .await
                     }
+                    "p2pWelcomeAck" => {
+                        self.handle_p2p_welcome_ack_unified(
+                            payload,
+                            sender_tag,
+                            sender_username,
+                            recipient_username,
+                        )
+                        .await
+                    }
                     "groupJoinResponse" => {
                         self.handle_group_join_response_unified(
                             payload,
@@ -217,6 +226,10 @@ impl MessageUtils {
                             recipient_username,
                         )
                         .await
+                    }
+                    "ack" => {
+                        self.handle_ack_unified(payload, sender_tag, sender_username)
+                            .await
                     }
                     _ => log::error!("Unknown unified action: {}", action),
                 }
@@ -1253,6 +1266,12 @@ impl MessageUtils {
         if let Some(signature) = signature {
             if let Some(entry) = self.pending_users.remove(&sender_tag) {
                 let (username, public_key, nonce) = entry.data;
+                log::info!(
+                    "Verifying registration signature for '{}' (nonce={}, sig_len={})",
+                    username,
+                    nonce,
+                    signature.len()
+                );
                 let is_valid = self.crypto.verify_signature(&public_key, &nonce, signature);
 
                 if is_valid {
@@ -1287,6 +1306,10 @@ impl MessageUtils {
                         .await;
                     }
                 } else {
+                    log::warn!(
+                        "Registration signature verification FAILED for '{}'",
+                        username
+                    );
                     let response_payload = json!({"result": "error", "context": "registration", "message": "invalid signature"});
                     self.send_unified_reply(
                         sender_tag,
@@ -1297,6 +1320,10 @@ impl MessageUtils {
                     .await;
                 }
             } else {
+                log::warn!(
+                    "No pending registration found for sender_tag={:?}",
+                    sender_tag
+                );
                 let response_payload = json!({"result": "error", "context": "registration", "message": "no pending registration"});
                 self.send_unified_reply(
                     sender_tag,
@@ -1307,6 +1334,7 @@ impl MessageUtils {
                 .await;
             }
         } else {
+            log::warn!("Registration response missing signature field");
             let response_payload = json!({"result": "error", "context": "registration", "message": "missing signature"});
             self.send_unified_reply(sender_tag, response_payload, "challengeResponse", "unknown")
                 .await;
@@ -1448,6 +1476,7 @@ impl MessageUtils {
         payload: &Value,
         sender_tag: AnonymousSenderTag,
         sender_username: &str,
+        recipient_username: Option<&str>,
     ) {
         log::debug!(
             "Received unified send message from {} with payload: {}",
@@ -1466,115 +1495,33 @@ impl MessageUtils {
                 conversation_id
             );
 
-            // TODO: Extract recipient from conversation_id or maintain routing table
-            // For now, we need to determine the recipient from the conversation_id format "sender-recipient"
-            let conversation_decoded = match base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                conversation_id.as_bytes(),
-            ) {
-                Ok(decoded) => String::from_utf8_lossy(&decoded).to_string(),
-                Err(_) => conversation_id.to_string(),
+            // Use the recipient from the top-level message envelope
+            let recipient = match recipient_username {
+                Some(r) if !r.is_empty() => r,
+                _ => {
+                    log::error!("No recipient specified in message envelope for MLS send from {}", sender_username);
+                    let response_payload =
+                        json!({"status": "error", "message": "missing recipient field"});
+                    self.send_unified_reply(
+                        sender_tag,
+                        response_payload,
+                        "sendResponse",
+                        sender_username,
+                    )
+                    .await;
+                    return;
+                }
             };
 
-            // Extract recipient from conversation format "sender-recipient"
-            let parts: Vec<&str> = conversation_decoded.split('-').collect();
-            if parts.len() >= 2 {
-                let recipient = if parts[0] == sender_username {
-                    parts[1]
-                } else {
-                    parts[0]
-                };
-
-                // Look up recipient's Nym address and forward message
-                if let Ok(Some((_username, _public_key, target_sender_tag))) =
-                    self.db.get_user_by_username(recipient).await
+                // Check recipient exists before persisting
+                if self
+                    .db
+                    .get_user_by_username(recipient)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_none()
                 {
-                    // Check if recipient has a valid sender tag (is online)
-                    let is_online = !target_sender_tag.is_empty()
-                        && AnonymousSenderTag::try_from_base58_string(&target_sender_tag).is_ok();
-
-                    if is_online {
-                        if let Ok(recipient_tag) =
-                            AnonymousSenderTag::try_from_base58_string(&target_sender_tag)
-                        {
-                            // Forward the MLS encrypted payload as-is
-                            let message_payload = payload.clone();
-
-                            // Forward message to recipient using unified format (type: "message", action: "send")
-                            self.send_unified_message(
-                                recipient_tag,
-                                message_payload,
-                                "send",
-                                recipient,
-                                sender_username,
-                            )
-                            .await;
-                            log::info!(
-                                "Successfully forwarded MLS message from {} to {}",
-                                sender_username,
-                                recipient
-                            );
-
-                            // Send success response to sender
-                            let response_payload = json!({
-                                "status": "delivered",
-                                "recipient": recipient,
-                                "message": "Message delivered successfully"
-                            });
-                            self.send_unified_reply(
-                                sender_tag,
-                                response_payload,
-                                "sendResponse",
-                                sender_username,
-                            )
-                            .await;
-                        }
-                    } else {
-                        // Recipient is offline - queue message for later delivery
-                        log::info!(
-                            "Recipient {} is offline, queueing message from {}",
-                            recipient,
-                            sender_username
-                        );
-                        let payload_str = serde_json::to_string(payload).unwrap_or_default();
-                        match self
-                            .db
-                            .queue_pending_message(recipient, sender_username, &payload_str, "send")
-                            .await
-                        {
-                            Ok(msg_id) => {
-                                log::info!(
-                                    "Queued message {} for offline recipient {}",
-                                    msg_id,
-                                    recipient
-                                );
-                                let response_payload = json!({
-                                    "status": "queued",
-                                    "recipient": recipient,
-                                    "message": "Recipient offline, message queued for delivery"
-                                });
-                                self.send_unified_reply(
-                                    sender_tag,
-                                    response_payload,
-                                    "sendResponse",
-                                    sender_username,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                log::error!("Failed to queue message for {}: {}", recipient, e);
-                                let response_payload = json!({"status": "error", "message": "failed to queue message"});
-                                self.send_unified_reply(
-                                    sender_tag,
-                                    response_payload,
-                                    "sendResponse",
-                                    sender_username,
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                } else {
                     log::info!("Recipient {} not found in database", recipient);
                     let response_payload =
                         json!({"status": "error", "message": "recipient not found"});
@@ -1585,19 +1532,40 @@ impl MessageUtils {
                         sender_username,
                     )
                     .await;
+                } else {
+                    // Persist-then-relay: message is safe in DB, best-effort SURB delivery
+                    match self
+                        .relay_with_persistence(recipient, sender_username, payload, "send")
+                        .await
+                    {
+                        Ok(_pending_id) => {
+                            let response_payload = json!({
+                                "status": "sent",
+                                "recipient": recipient,
+                                "message": "Message accepted for delivery"
+                            });
+                            self.send_unified_reply(
+                                sender_tag,
+                                response_payload,
+                                "sendResponse",
+                                sender_username,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to relay message to {}: {}", recipient, e);
+                            let response_payload =
+                                json!({"status": "error", "message": "failed to queue message"});
+                            self.send_unified_reply(
+                                sender_tag,
+                                response_payload,
+                                "sendResponse",
+                                sender_username,
+                            )
+                            .await;
+                        }
+                    }
                 }
-            } else {
-                log::error!("Invalid conversation_id format: {}", conversation_decoded);
-                let response_payload =
-                    json!({"status": "error", "message": "invalid conversation format"});
-                self.send_unified_reply(
-                    sender_tag,
-                    response_payload,
-                    "sendResponse",
-                    sender_username,
-                )
-                .await;
-            }
         } else {
             let response_payload =
                 json!({"status": "error", "message": "missing conversation_id or mls_message"});
@@ -1728,17 +1696,11 @@ impl MessageUtils {
                 )
                 .await;
 
-                // Delete delivered messages
-                if !message_ids.is_empty() {
-                    if let Err(e) = self.db.delete_pending_messages(&message_ids).await {
-                        log::error!("fetchPending: failed to delete messages: {}", e);
-                    } else {
-                        log::debug!(
-                            "fetchPending: deleted {} delivered messages",
-                            message_ids.len()
-                        );
-                    }
-                }
+                // Messages are NOT deleted here — the client will ACK them
+                // after successful processing, and handle_ack_unified will
+                // delete them. This prevents message loss if the SURB
+                // response doesn't reach the client.
+                let _ = message_ids; // suppress unused warning
             }
             Err(e) => {
                 log::error!("fetchPending: failed to get messages: {}", e);
@@ -1764,36 +1726,33 @@ impl MessageUtils {
     ) {
         log::info!("Handling key package request from {}", sender_username);
 
-        // Use the recipient from the message structure
         if let Some(recipient) = recipient_username {
-            // Route the key package request to the intended recipient
-            if let Some(recipient_tag) = self.get_user_sender_tag(recipient).await {
-                log::info!(
-                    "Routing key package request from {} to {}",
-                    sender_username,
-                    recipient
-                );
-                self.send_unified_message(
-                    recipient_tag,
-                    payload.clone(),
-                    "keyPackageRequest",
-                    recipient,
-                    sender_username,
-                )
-                .await;
-            } else {
-                log::warn!("Recipient {} not found for key package request", recipient);
-                let error_payload = json!({
-                    "status": "error",
-                    "message": format!("Recipient {} not found or offline", recipient)
-                });
-                self.send_unified_reply(
-                    sender_tag,
-                    error_payload,
-                    "keyPackageResponse",
-                    sender_username,
-                )
-                .await;
+            match self
+                .relay_with_persistence(recipient, sender_username, payload, "keyPackageRequest")
+                .await
+            {
+                Ok(pending_id) => {
+                    log::info!(
+                        "Relayed key package request from {} to {} (pending_id={})",
+                        sender_username,
+                        recipient,
+                        pending_id
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to relay key package request to {}: {}", recipient, e);
+                    let error_payload = json!({
+                        "status": "error",
+                        "message": format!("Failed to relay key package request: {}", e)
+                    });
+                    self.send_unified_reply(
+                        sender_tag,
+                        error_payload,
+                        "keyPackageResponse",
+                        sender_username,
+                    )
+                    .await;
+                }
             }
         } else {
             log::error!("Key package request missing recipient field");
@@ -1814,33 +1773,43 @@ impl MessageUtils {
     async fn handle_key_package_response_unified(
         &mut self,
         payload: &Value,
-        _sender_tag: AnonymousSenderTag,
+        sender_tag: AnonymousSenderTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
         log::info!("Handling key package response from {}", sender_username);
 
-        // Route the key package response back to the original requester
         if let Some(recipient) = recipient_username {
-            if let Some(recipient_tag) = self.get_user_sender_tag(recipient).await {
-                log::info!(
-                    "Routing key package response from {} to {}",
-                    sender_username,
-                    recipient
-                );
-                self.send_unified_message(
-                    recipient_tag,
-                    payload.clone(),
-                    "keyPackageResponse",
-                    recipient,
-                    sender_username,
-                )
-                .await;
-            } else {
-                log::warn!(
-                    "Original requester {} not found for key package response",
-                    recipient
-                );
+            match self
+                .relay_with_persistence(recipient, sender_username, payload, "keyPackageResponse")
+                .await
+            {
+                Ok(pending_id) => {
+                    log::info!(
+                        "Relayed key package response from {} to {} (pending_id={})",
+                        sender_username,
+                        recipient,
+                        pending_id
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to relay key package response to {}: {}",
+                        recipient,
+                        e
+                    );
+                    let error_payload = json!({
+                        "status": "error",
+                        "message": format!("Failed to relay key package response: {}", e)
+                    });
+                    self.send_unified_reply(
+                        sender_tag,
+                        error_payload,
+                        "keyPackageResponse",
+                        sender_username,
+                    )
+                    .await;
+                }
             }
         } else {
             log::error!("Key package response missing recipient field");
@@ -1856,36 +1825,33 @@ impl MessageUtils {
     ) {
         log::info!("Handling P2P welcome message from {}", sender_username);
 
-        // Route the P2P welcome message to the intended recipient
-        // This is for direct messaging handshake (1:1 conversations)
         if let Some(recipient) = recipient_username {
-            if let Some(recipient_tag) = self.get_user_sender_tag(recipient).await {
-                log::info!(
-                    "Routing P2P welcome from {} to {}",
-                    sender_username,
-                    recipient
-                );
-                self.send_unified_message(
-                    recipient_tag,
-                    payload.clone(),
-                    "p2pWelcome",
-                    recipient,
-                    sender_username,
-                )
-                .await;
-            } else {
-                log::warn!("Recipient {} not found for P2P welcome", recipient);
-                let error_payload = json!({
-                    "status": "error",
-                    "message": format!("Recipient {} not found or offline", recipient)
-                });
-                self.send_unified_reply(
-                    sender_tag,
-                    error_payload,
-                    "groupJoinResponse",
-                    sender_username,
-                )
-                .await;
+            match self
+                .relay_with_persistence(recipient, sender_username, payload, "p2pWelcome")
+                .await
+            {
+                Ok(pending_id) => {
+                    log::info!(
+                        "Relayed P2P welcome from {} to {} (pending_id={})",
+                        sender_username,
+                        recipient,
+                        pending_id
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to relay P2P welcome to {}: {}", recipient, e);
+                    let error_payload = json!({
+                        "status": "error",
+                        "message": format!("Failed to relay P2P welcome: {}", e)
+                    });
+                    self.send_unified_reply(
+                        sender_tag,
+                        error_payload,
+                        "groupJoinResponse",
+                        sender_username,
+                    )
+                    .await;
+                }
             }
         } else {
             log::error!("P2P welcome message missing recipient field");
@@ -1903,36 +1869,143 @@ impl MessageUtils {
         }
     }
 
+    async fn handle_p2p_welcome_ack_unified(
+        &mut self,
+        payload: &Value,
+        sender_tag: AnonymousSenderTag,
+        sender_username: &str,
+        recipient_username: Option<&str>,
+    ) {
+        log::info!("Handling P2P welcome ack from {}", sender_username);
+
+        if let Some(recipient) = recipient_username {
+            match self
+                .relay_with_persistence(recipient, sender_username, payload, "p2pWelcomeAck")
+                .await
+            {
+                Ok(pending_id) => {
+                    log::info!(
+                        "Relayed P2P welcome ack from {} to {} (pending_id={})",
+                        sender_username,
+                        recipient,
+                        pending_id
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to relay P2P welcome ack to {}: {}", recipient, e);
+                    let error_payload = json!({
+                        "status": "error",
+                        "message": format!("Failed to relay P2P welcome ack: {}", e)
+                    });
+                    self.send_unified_reply(
+                        sender_tag,
+                        error_payload,
+                        "p2pWelcomeAck",
+                        sender_username,
+                    )
+                    .await;
+                }
+            }
+        } else {
+            log::error!("P2P welcome ack missing recipient field");
+        }
+    }
+
     async fn handle_group_join_response_unified(
         &mut self,
         payload: &Value,
-        _sender_tag: AnonymousSenderTag,
+        sender_tag: AnonymousSenderTag,
         sender_username: &str,
         recipient_username: Option<&str>,
     ) {
         log::info!("Handling group join response from {}", sender_username);
 
-        // Route the group join response back to the group creator
         if let Some(recipient) = recipient_username {
-            if let Some(recipient_tag) = self.get_user_sender_tag(recipient).await {
-                log::info!(
-                    "Routing group join response from {} to {}",
-                    sender_username,
-                    recipient
-                );
-                self.send_unified_message(
-                    recipient_tag,
-                    payload.clone(),
-                    "groupJoinResponse",
-                    recipient,
-                    sender_username,
-                )
-                .await;
-            } else {
-                log::warn!("Group creator {} not found for join response", recipient);
+            match self
+                .relay_with_persistence(recipient, sender_username, payload, "groupJoinResponse")
+                .await
+            {
+                Ok(pending_id) => {
+                    log::info!(
+                        "Relayed group join response from {} to {} (pending_id={})",
+                        sender_username,
+                        recipient,
+                        pending_id
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to relay group join response to {}: {}",
+                        recipient,
+                        e
+                    );
+                    let error_payload = json!({
+                        "status": "error",
+                        "message": format!("Failed to relay group join response: {}", e)
+                    });
+                    self.send_unified_reply(
+                        sender_tag,
+                        error_payload,
+                        "groupJoinResponse",
+                        sender_username,
+                    )
+                    .await;
+                }
             }
         } else {
             log::error!("Group join response missing recipient field");
+        }
+    }
+
+    /// Handle ACK from client: delete the acknowledged pending messages.
+    ///
+    /// Clients send ACKs after processing messages (both SURB-delivered and fetchPending).
+    /// No response is sent back — worst case the client re-ACKs and we get a no-op delete.
+    async fn handle_ack_unified(
+        &mut self,
+        payload: &Value,
+        _sender_tag: AnonymousSenderTag,
+        sender_username: &str,
+    ) {
+        let pending_ids: Vec<i64> = match payload.get("pendingIds").and_then(|v| v.as_array()) {
+            Some(arr) => arr.iter().filter_map(|v| v.as_i64()).collect(),
+            None => {
+                log::warn!("ACK from {} missing pendingIds array", sender_username);
+                return;
+            }
+        };
+
+        if pending_ids.is_empty() {
+            return;
+        }
+
+        log::info!(
+            "Processing ACK from {} for {} pending message(s): {:?}",
+            sender_username,
+            pending_ids.len(),
+            pending_ids
+        );
+
+        match self
+            .db
+            .delete_pending_messages_for_recipient(sender_username, &pending_ids)
+            .await
+        {
+            Ok(deleted) => {
+                log::debug!(
+                    "ACK: deleted {} of {} pending messages for {}",
+                    deleted,
+                    pending_ids.len(),
+                    sender_username
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "ACK: failed to delete pending messages for {}: {}",
+                    sender_username,
+                    e
+                );
+            }
         }
     }
 
@@ -2028,6 +2101,68 @@ impl MessageUtils {
         } else {
             log::error!("Failed to sign unified message");
         }
+    }
+
+    /// Persist a message to the pending queue, then attempt best-effort SURB delivery.
+    ///
+    /// Returns the pending message ID. If the recipient is online, the message is also
+    /// sent immediately via SURB with a `pendingId` field injected into the payload so
+    /// the client can ACK it. If the recipient is offline, the message stays in the DB
+    /// for `fetchPending` to pick up later.
+    async fn relay_with_persistence(
+        &mut self,
+        recipient: &str,
+        sender: &str,
+        payload: &Value,
+        action: &str,
+    ) -> Result<i64, String> {
+        // 1. Persist to DB first — message is now safe
+        let payload_str = serde_json::to_string(payload).unwrap_or_default();
+        let pending_id = self
+            .db
+            .queue_pending_message(recipient, sender, &payload_str, action)
+            .await
+            .map_err(|e| format!("Failed to queue pending message: {}", e))?;
+
+        log::info!(
+            "Persisted pending message {} (action={}) from {} to {}",
+            pending_id,
+            action,
+            sender,
+            recipient
+        );
+
+        // 2. Best-effort SURB delivery if recipient is online
+        if let Some(recipient_tag) = self.get_user_sender_tag(recipient).await {
+            // Clone payload and inject pendingId so client can ACK
+            let mut delivery_payload = payload.clone();
+            if let Some(obj) = delivery_payload.as_object_mut() {
+                obj.insert("pendingId".to_string(), json!(pending_id));
+            }
+
+            self.send_unified_message(
+                recipient_tag,
+                delivery_payload,
+                action,
+                recipient,
+                sender,
+            )
+            .await;
+
+            log::info!(
+                "Best-effort SURB delivery of pending message {} to {}",
+                pending_id,
+                recipient
+            );
+        } else {
+            log::info!(
+                "Recipient {} offline, message {} queued for fetchPending",
+                recipient,
+                pending_id
+            );
+        }
+
+        Ok(pending_id)
     }
 
     /// Sign and send a JSON reply over the mixnet using SURBs.
